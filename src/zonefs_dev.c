@@ -78,6 +78,30 @@ static int zonefs_dev_busy(struct zonefs_dev *dev)
 }
 
 /*
+ * Check that the device supports reset all zones operation.
+ * For now, simply exclude DM devices as that operation is never
+ * supported on these devices.
+ */
+static bool zonefs_dev_has_reset_all(struct zonefs_dev *dev)
+{
+	char path[PATH_MAX];
+	struct stat st;
+	int len;
+
+	/* Check if this is a DM device */
+	len = snprintf(path, sizeof(path),
+		       "/sys/block/%s/dm/name",
+		       dev->name);
+	if (len >= PATH_MAX) {
+		fprintf(stderr, "name %s failed: %s\n", path,
+			strerror(ENAMETOOLONG));
+		return false;
+	}
+
+	return stat(path, &st) != 0;
+}
+
+/*
  * Check that the device is a zoned block device.
  */
 static bool zonefs_dev_is_zoned(struct zonefs_dev *dev)
@@ -400,8 +424,12 @@ static int zonefs_check_overwrite(struct zonefs_dev *dev)
 	blkid_probe pr;
 	int ret = -1;
 
-	pr = blkid_new_probe_from_filename(dev->path);
+	pr = blkid_new_probe();
 	if (!pr)
+		goto out;
+
+	ret = blkid_probe_set_device(pr, dev->fd, 0, 0);
+	if (ret < 0)
 		goto out;
 
 	ret = blkid_probe_enable_superblocks(pr, 1);
@@ -480,13 +508,6 @@ int zonefs_open_dev(struct zonefs_dev *dev, bool check_overwrite)
 		return -1;
 	}
 
-	if (check_overwrite && !(dev->flags & ZONEFS_OVERWRITE)) {
-		/* Check for existing valid content */
-		ret = zonefs_check_overwrite(dev);
-		if (ret <= 0)
-			return -1;
-	}
-
 	if (zonefs_dev_mounted(dev)) {
 		fprintf(stderr,
 			"%s is mounted\n",
@@ -502,7 +523,7 @@ int zonefs_open_dev(struct zonefs_dev *dev, bool check_overwrite)
 	}
 
 	/* Open device */
-	dev->fd = open(dev->path, O_RDWR | O_DIRECT);
+	dev->fd = open(dev->path, O_RDWR | O_EXCL);
 	if (dev->fd < 0) {
 		fprintf(stderr,
 			"Open %s failed %d (%s)\n",
@@ -511,13 +532,31 @@ int zonefs_open_dev(struct zonefs_dev *dev, bool check_overwrite)
 		return -1;
 	}
 
-	/* Get device capacity and zone configuration */
-	if (zonefs_get_dev_info(dev) < 0) {
-		zonefs_close_dev(dev);
-		return -1;
+	if (check_overwrite && !(dev->flags & ZONEFS_OVERWRITE)) {
+		/* Check for existing valid content */
+		ret = zonefs_check_overwrite(dev);
+		if (ret <= 0)
+			goto err;
 	}
 
+	/* We need direct writes */
+	ret = fcntl(dev->fd, F_SETFL, O_DIRECT);
+	if (ret) {
+		fprintf(stderr,
+			"Set O_DIRECT failed %d (%s)\n",
+			errno, strerror(errno));
+		goto err;
+	}
+
+	/* Get device capacity and zone configuration */
+	if (zonefs_get_dev_info(dev) < 0)
+		goto err;
+
 	return 0;
+
+err:
+	zonefs_close_dev(dev);
+	return -1;
 }
 
 /*
@@ -602,15 +641,14 @@ int zonefs_finish_zone(struct zonefs_dev *dev, struct blk_zone *zone)
 /*
  * Reset a zone.
  */
-int zonefs_reset_zone(struct zonefs_dev *dev, struct blk_zone *zone)
+static int zonefs_reset_zone(struct zonefs_dev *dev, struct blk_zone *zone)
 {
 	struct blk_zone_range range;
 
-	if (zone->type == BLK_ZONE_TYPE_CONVENTIONAL ||
-	    zone->cond == BLK_ZONE_COND_EMPTY)
+	if (zone->type == BLK_ZONE_TYPE_CONVENTIONAL)
 		return 0;
 
-	/* Non empty sequential zone: reset */
+	/* Sequential zone: reset */
 	range.sector = zone->start;
 	range.nr_sectors = zone->len;
 	if (ioctl(dev->fd, BLKRESETZONE, &range) < 0) {
@@ -631,11 +669,30 @@ int zonefs_reset_zone(struct zonefs_dev *dev, struct blk_zone *zone)
  */
 int zonefs_reset_zones(struct zonefs_dev *dev)
 {
+	struct blk_zone_range range;
 	unsigned int i;
+	int ret;
 
+	/*
+	 * Try to reset all zones. This does not work on all devices so if
+	 * this fails, fall back to resetting zones one at a time.
+	 */
+	if (zonefs_dev_has_reset_all(dev)) {
+		range.sector = 0;
+		range.nr_sectors = dev->capacity;
+		ret = ioctl(dev->fd, BLKRESETZONE, &range);
+		if (!ret) {
+			for (i = 0; i < dev->nr_zones; i++)
+				dev->zones[i].wp = dev->zones[i].start;
+			return 0;
+		}
+	}
+
+	/* Fallback to zone reset zones one at a time */
 	for (i = 0; i < dev->nr_zones; i++) {
-		if (zonefs_reset_zone(dev, &dev->zones[i]) < 0)
-			return -1;
+		ret = zonefs_reset_zone(dev, &dev->zones[i]);
+		if (ret)
+			return ret;
 	}
 
 	return 0;

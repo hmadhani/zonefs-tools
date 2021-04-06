@@ -16,6 +16,11 @@ generate_fio() {
 		filename="$filename:$zonefs_mntdir/seq/$i"
 	done
 
+	filesize=$(file_max_size "$zonefs_mntdir"/seq/0)
+	if $short; then
+		filesize=$((zone_sectors * 512 / 64))
+	fi
+
 	cat > 0092.fio << EOF
 [global]
 create_on_open=0
@@ -24,8 +29,8 @@ file_append=1
 unlink=0
 rw=write
 ioengine=psync
-bs=4k
-filesize=$(file_max_size "$zonefs_mntdir"/seq/0)
+bs=${iosize}
+filesize=${filesize}
 continue_on_error=none
 direct=1
 
@@ -40,7 +45,7 @@ function cleanup {
 trap cleanup EXIT
 
 if [ $# == 0 ]; then
-	echo "explicit-open mounts"
+	echo "Sequential file explicit-open zone resources"
         exit 0
 fi
 

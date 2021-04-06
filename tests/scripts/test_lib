@@ -107,6 +107,10 @@ function clear_sb()
 	if [ $nrcnv == 0 ]; then
 		blkzone reset --offset 0 -c 1 "$1" ||
 			(echo "Reset super block zone failed"; exit 1)
+		# Resetting a zone does not clear the page cache of cached zone data
+		# pages. Take a big hammer and clear the page cache to avoid access
+		# to stale data.
+		echo 1 > /proc/sys/vm/drop_caches
 	else
 		dd if=/dev/zero of="$1" bs=4096 oflag=direct count=1 ||
 			(echo "Clear super block failed"; exit 1)
@@ -156,7 +160,7 @@ function check_perm()
 		while read -r line; do
 
 			fp=(${line})
-			f=$(basename "${fp[0]}")
+			f=${fp[0]##*/}
 			perm=${fp[1]}
 
 			if [ "$perm" != "$1" ]; then
@@ -171,7 +175,7 @@ function check_perm()
 	while read -r line; do
 
 		fp=(${line})
-		f=$(basename "${fp[0]}")
+		f=${fp[0]##*/}
 		perm=${fp[1]}
 
 		if [ "$perm" != "$1" ]; then
@@ -189,7 +193,7 @@ function check_uid_gid()
 		while read -r line; do
 
 			fug=(${line})
-			f=$(basename "${fug[0]}")
+			f=${fug[0]##*/}
 			uid=${fug[1]}
 			gid=${fug[2]}
 
@@ -209,7 +213,7 @@ function check_uid_gid()
 	while read -r line; do
 
 		fug=(${line})
-		f=$(basename "${fug[0]}")
+		f=${fug[0]##*/}
 		uid=${fug[1]}
 		gid=${fug[2]}
 
@@ -237,6 +241,18 @@ function file_max_size()
 	echo "$(( nr_blocks * block_size ))"
 }
 
+function aggr_cnv_size()
+{
+	size=$(file_max_size "$zonefs_mntdir"/cnv/0)
+	two_zones_size=$((zone_sectors * 2 * 512))
+
+	if $short && ((two_zones_size < size)); then
+		size="${two_zones_size}"
+	fi
+
+	echo "${size}"
+}
+
 function check_size()
 {
 	aggr_cnv=$1
@@ -253,7 +269,7 @@ function check_size()
 		while read -r line; do
 
 			fsz=(${line})
-			f=$(basename "${fsz[0]}")
+			f=${fsz[0]##*/}
 			sz=${fsz[1]}
 
 			if [ "$sz" != "$expected_sz" ]; then
@@ -268,7 +284,7 @@ function check_size()
 	while read -r line; do
 
 		fsz=(${line})
-		f=$(basename "${fsz[0]}")
+		f=${fsz[0]##*/}
 		sz=${fsz[1]}
 
 		if [ "$sz" != "0" ]; then

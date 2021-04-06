@@ -15,12 +15,18 @@ zone_max_open=0
 # Capacity (MB)
 capacity=4096
 
+# Default number of conventional zones to test
+nr_conv=(16 1 0)
+
 function usage() {
 	echo "Usage: $0 [options]"
 	echo "Options:"
-	echo "	-h | --help:	Display help"
-	echo "	-c | --cap:	Test with zone capacity < zone size (default: off)"
-	echo "	-o | --moz:	Test with max open zone limit set (default: no limit)"
+	echo "    -h | --help   : Display help"
+	echo "    -c | --cap    : Test with zone capacity < zone size (default: off)"
+	echo "    -o | --moz    : Test with max open zone limit set (default: no limit)"
+	echo "    -t <test num> : Test to execute. Can be specified multiple times."
+	echo "                    If used, only the first nullb config is used"
+	echo "    -n <nr conv>  : Specify the number of conventional zones to use."
 }
 
 # Check credentials
@@ -28,6 +34,8 @@ if [ $(id -u) -ne 0 ]; then
         echo "Root credentials are needed to run tests."
         exit 1
 fi
+
+testopts=""
 
 # Check options
 while [[ $# -gt 0 ]]; do
@@ -44,6 +52,16 @@ while [[ $# -gt 0 ]]; do
 			usage "$0"
 			exit 0
                         ;;
+		"-t")
+			shift
+			testopts+=" -t $1"
+			shift
+			;;
+		"-n")
+			shift
+			nr_conv=($1)
+			shift
+			;;
                 *)
 			echo "Invalid option $1"
 			exit 1
@@ -84,9 +102,9 @@ function create_zoned_nullb()
 	fi
 
 	echo 4096 > "$dev"/blocksize
-	echo 0 > "$dev"/completion_nsec
-	echo 0 > "$dev"/irqmode
 	echo 2 > "$dev"/queue_mode
+	echo 2 > "$dev"/irqmode
+	echo 5000 > "$dev"/completion_nsec
 
 	echo $capacity > "$dev"/size
 	echo 1024 > "$dev"/hw_queue_depth
@@ -118,9 +136,8 @@ function destroy_zoned_nullb()
 
 declare -i rc=0
 
-# Do 3 runs for 3 different drives: 16 conventional zones,
-# 1 conventional zone and no conventional zones.
-for c in 16 1 0; do
+# Run all drive configurations (3 by default)
+for c in ${nr_conv[@]}; do
 
 	echo ""
 	echo "Run tests against device with $c conventional zones..."
@@ -130,13 +147,14 @@ for c in 16 1 0; do
 	nulld=$(create_zoned_nullb $c)
 
 	logfile="nullb${nulld}-cnv${c}-zonefs-tests.log"
-	if ! ./zonefs-tests.sh "-g" "$logfile" "/dev/nullb$nulld"; then
+
+	if ! ./zonefs-tests.sh ${testopts} "-g" "$logfile" "/dev/nullb$nulld"; then
 		rc=1
 	fi
 
 	destroy_zoned_nullb "$nulld"
 
-	if [ "$aborted" == 1 ]; then
+	if [ "$aborted" == 1 ] || [ "$testopts" != "" ]; then
 		break
 	fi
 
